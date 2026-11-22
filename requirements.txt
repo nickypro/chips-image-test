@@ -1,0 +1,2 @@
+# One package per line, with its version pinned. Leave out what the base image has already (torch, numpy).
+einops==0.8.2

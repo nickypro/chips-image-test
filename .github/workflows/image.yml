@@ -1,0 +1,99 @@
+# Build this repository's Dockerfile and publish it to GitHub Container Registry, for `chips run --image`.
+# Template from the MATS GPU platform's BUILD_YOUR_IMAGE.md.
+#
+# - Every push and pull request builds the image, so a broken Dockerfile shows up before it merges.
+# - A push to main or a v* tag also publishes ghcr.io/<owner>/<repository>:sha-<commit> (and :latest from main,
+#   :v1.2.3 from a tag), then writes the line to run it, pinned by digest, on the run's summary page.
+# - It needs no secret of yours: GITHUB_TOKEN may push to this repository's own package (permissions below).
+# - The platform pulls with no credentials, so make the package public once, after the first publish
+#   (BUILD_YOUR_IMAGE.md, step 3).
+name: image
+
+"on":  # quoted: a bare on is a boolean in YAML 1.1
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write  # push to ghcr.io/<owner>/<repository>
+    env:
+      PUBLISH: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    steps:
+      # Third-party actions are pinned to a commit; the comment says which release it is.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # CUDA images are large; the hosted runner's preinstalled toolchains go to make room.
+      - name: Disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Registry names must be lowercase; GitHub owner and repository names may not be.
+      - name: Name the image and its tags
+        id: name
+        shell: bash
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tags="$image:sha-$GITHUB_SHA"
+          if [ "$GITHUB_REF" = refs/heads/main ]; then tags="$tags,$image:latest"; fi
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tags="$tags,$image:$GITHUB_REF_NAME"; fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The platform's GPU nodes are Linux x86_64, so build for linux/amd64 only.
+      - name: Build (and publish, from main or a v* tag)
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.name.outputs.tags }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Write the pinned reference to the summary
+        if: env.PUBLISH == 'true'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          case "$DIGEST" in sha256:????????????????????????????????????????????????????????????????) ;;
+            *) echo "::error::the build returned no sha256 digest ($DIGEST)"; exit 1 ;; esac
+          {
+            echo "### Published"
+            echo
+            echo "Run it on the MATS GPU platform, pinned to exactly this build:"
+            echo
+            echo '```sh'
+            echo "chips run --image $IMAGE@$DIGEST 'python3 your_script.py'"
+            echo '```'
+            echo
+            echo "First publish? Make the package public, or the platform can't pull it: the package's page on GitHub, Package settings, Change visibility."
+          } >> "$GITHUB_STEP_SUMMARY"

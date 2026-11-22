@@ -1,0 +1,9 @@
+# Keep the build context small, and keep secrets out of it.
+.git
+.github
+.env
+*.pem
+*.key
+__pycache__
+data/
+checkpoints/
